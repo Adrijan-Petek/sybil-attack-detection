@@ -1,13 +1,14 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import Image from 'next/image';
-import type { EdgeDefinition, ElementDefinition, NodeDefinition, NodeSingular } from 'cytoscape';
-import { computeSharedLinksByActor, extractLinks, isSuspiciousDomain, linkDiversityScore, normalizeLinks, updateProfileAnomalyScore } from '../lib/profile';
+import type { ElementDefinition, NodeSingular } from 'cytoscape';
+import { normalizeLinks } from '../lib/profile';
 import { extractUrlsFromText } from '../lib/urlResolvers';
-import { computeHandlePatternScores, isLikelyPhishingUrl } from '../lib/scam';
+import { computeHandlePatternScores } from '../lib/scam';
+import type { AnalysisSettings, ActorScorecard, DetailedCluster, LogEntry, WaveResult } from '../lib/analyze';
 import type { ReviewDecision } from '../lib/reviewStore';
 import { deleteReview, getAllReviews, upsertReview } from '../lib/reviewStore';
 import Papa from 'papaparse';
@@ -15,90 +16,7 @@ import Papa from 'papaparse';
 // Dynamically import CytoscapeComponent to avoid SSR issues
 const CytoscapeComponent = dynamic(() => import('react-cytoscapejs'), { ssr: false });
 
-interface LogEntry {
-  timestamp: string;
-  actor: string;
-  target: string;
-  action: string;
-  platform: string;
-  bio?: string;
-  links?: string[];
-  followerCount?: number;
-  followingCount?: number;
-  amount?: number;
-  txHash?: string;
-  blockNumber?: number;
-  meta?: string;
-  targetType?: string;
-  actorCreatedAt?: string;
-  verified?: boolean;
-  location?: string;
-}
-
-interface DetailedCluster {
-  clusterId: number;
-  members: string[];
-  density: number;
-  conductance: number;
-  externalEdges: number;
-}
-
-interface WaveResult {
-  windowStart: string;
-  windowEnd: string;
-  action: string;
-  target: string;
-  actors: string[];
-  zScore: number;
-}
-
-interface ActorScorecard {
-  actor: string;
-  sybilScore: number;
-  churnScore: number;
-  coordinationScore: number;
-  noveltyScore: number;
-  clusterIsolationScore: number;
-  lowDiversityScore: number;
-  profileAnomalyScore: number;
-  links: string[];
-  suspiciousLinks: string[];
-  sharedLinks: string[];
-  linkDiversity: number;
-  reciprocalRate: number;
-  burstRate: number;
-  newAccountScore: number;
-  bioSimilarityScore: number;
-  handlePatternScore: number;
-  phishingLinkScore: number;
-  reasons: string[];
-}
-
-interface ActorStats {
-  actor: string;
-  totalActions: number;
-  churnActions: number;
-  burstActions: number;
-  uniqueTargets: Set<string>;
-  connections: number;
-  clusterSize: number;
-  positiveOut: number;
-  positiveIn: number;
-  mutualPositive: number;
-  firstSeenMs?: number;
-}
-
 type CsvRow = Record<string, string | undefined>;
-
-interface AnalysisSettings {
-  threshold: number;
-  minClusterSize: number;
-  timeBinMinutes: number;
-  waveMinCount: number;
-  waveMinActors: number;
-  positiveActions: string[];
-  churnActions: string[];
-}
 
 type TabKey = 'dashboard' | 'data' | 'generator' | 'analysis' | 'graph' | 'results' | 'review' | 'evidence';
 
@@ -170,6 +88,13 @@ export default function Home() {
   const [syntheticLastLogs, setSyntheticLastLogs] = useState<LogEntry[] | null>(null);
 
   const [reviews, setReviews] = useState<Record<string, { decision: ReviewDecision | ''; note?: string; updatedAt: string }>>({});
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState<{ stage: string; pct: number } | null>(null);
+  const [analysisRequestId, setAnalysisRequestId] = useState<string | null>(null);
+  const [analysisWorker, setAnalysisWorker] = useState<Worker | null>(null);
+  const analysisListenerRef = useRef<((ev: MessageEvent) => void) | null>(null);
+  const [resultsPage, setResultsPage] = useState(1);
+  const resultsPageSize = 50;
 
   const TabButton = ({ tab, label }: { tab: TabKey; label: string }) => (
     <button
@@ -302,6 +227,15 @@ export default function Home() {
       });
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const worker = new Worker(new URL('./workers/analyzeWorker.ts', import.meta.url), { type: 'module' });
+    setAnalysisWorker(worker);
+    return () => {
+      worker.terminate();
+      setAnalysisWorker(null);
     };
   }, []);
 
@@ -461,7 +395,74 @@ export default function Home() {
   };
 
   const startAnalysis = () => {
-    processData(logs);
+    runAnalysis(logs);
+  };
+
+  const runAnalysis = (data: LogEntry[]) => {
+    if (!analysisWorker) {
+      setSourceError('Analysis worker is not ready yet. Try again in a moment.');
+      return;
+    }
+    if (analysisRequestId) {
+      analysisWorker.postMessage({ type: 'cancel', requestId: analysisRequestId });
+    }
+    if (analysisListenerRef.current) {
+      analysisWorker.removeEventListener('message', analysisListenerRef.current);
+      analysisListenerRef.current = null;
+    }
+
+    const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setAnalysisRequestId(requestId);
+    setIsAnalyzing(true);
+    setAnalysisProgress({ stage: 'start', pct: 0 });
+    setSourceError(null);
+    setSourceStatus('Analyzing…');
+    setResultsPage(1);
+
+    type WorkerProgress = { type: 'progress'; requestId: string; stage: string; pct: number };
+    type WorkerResult = {
+      type: 'result';
+      requestId: string;
+      result: { elements: ElementDefinition[]; clusters: DetailedCluster[]; waves: WaveResult[]; scorecards: ActorScorecard[] };
+    };
+    type WorkerError = { type: 'error'; requestId: string; error: string };
+    type WorkerMsg = WorkerProgress | WorkerResult | WorkerError;
+
+    const onMessage = (ev: MessageEvent<WorkerMsg>) => {
+      const msg = ev.data;
+      if (!msg || msg.requestId !== requestId) return;
+
+      if (msg.type === 'progress') {
+        setAnalysisProgress({ stage: msg.stage || 'progress', pct: msg.pct ?? 0 });
+        return;
+      }
+
+      if (msg.type === 'result') {
+        setElements(msg.result.elements || []);
+        setClusters(msg.result.clusters || []);
+        setWaves(msg.result.waves || []);
+        setScorecards(msg.result.scorecards || []);
+        setIsAnalyzing(false);
+        setAnalysisProgress({ stage: 'done', pct: 100 });
+        setSourceStatus('Analysis complete');
+        analysisWorker.removeEventListener('message', onMessage);
+        analysisListenerRef.current = null;
+        setActiveTab('results');
+        return;
+      }
+
+      if (msg.type === 'error') {
+        setIsAnalyzing(false);
+        setSourceStatus(null);
+        setSourceError(msg.error || 'Analysis failed');
+        analysisWorker.removeEventListener('message', onMessage);
+        analysisListenerRef.current = null;
+      }
+    };
+
+    analysisWorker.addEventListener('message', onMessage);
+    analysisListenerRef.current = onMessage;
+    analysisWorker.postMessage({ type: 'analyze', requestId, logs: data, settings });
   };
 
   const appendLogs = (newLogs: LogEntry[], label: string) => {
@@ -647,6 +648,7 @@ export default function Home() {
       }
 
       setSourceStatus(`Profile scan complete: ${profiles.length} scanned`);
+      setActiveTab('analysis');
     } catch (e) {
       setSourceStatus(null);
       setSourceError(e instanceof Error ? e.message : 'Failed to scan profiles');
@@ -720,300 +722,7 @@ export default function Home() {
     a.click();
   };
 
-  const processData = (data: LogEntry[]) => {
-    try {
-      if (data.length === 0) {
-        setElements([]);
-        setClusters([]);
-        setWaves([]);
-        setScorecards([]);
-        return;
-      }
-
-      const allTimes = data.map((l) => new Date(l.timestamp).getTime()).filter((t) => Number.isFinite(t));
-      const datasetStartMs = allTimes.length > 0 ? Math.min(...allTimes) : Date.now();
-
-      // Collect profile data
-      const actorProfiles: {
-        [actor: string]: { bio?: string; links?: string[]; followerCount?: number; followingCount?: number; actorCreatedAt?: string; verified?: boolean; location?: string };
-      } = {};
-      data.forEach((log) => {
-        if (!actorProfiles[log.actor]) {
-          actorProfiles[log.actor] = {};
-        }
-        if (log.bio) actorProfiles[log.actor].bio = log.bio;
-        if (log.links) actorProfiles[log.actor].links = normalizeLinks(log.links);
-        if (log.followerCount !== undefined) actorProfiles[log.actor].followerCount = log.followerCount;
-        if (log.followingCount !== undefined) actorProfiles[log.actor].followingCount = log.followingCount;
-        if (log.actorCreatedAt) actorProfiles[log.actor].actorCreatedAt = log.actorCreatedAt;
-        if (log.verified !== undefined) actorProfiles[log.actor].verified = log.verified;
-        if (log.location) actorProfiles[log.actor].location = log.location;
-      });
-
-      const linksByActor = new Map<string, string[]>();
-      Object.entries(actorProfiles).forEach(([actor, profile]) => {
-        const fromProfile = profile.links ?? [];
-        const fromBio = profile.bio ? extractLinks(profile.bio) : [];
-        linksByActor.set(actor, normalizeLinks([...fromProfile, ...fromBio]));
-      });
-      const sharedLinksByActor = computeSharedLinksByActor(linksByActor);
-
-      const normalizedBioByActor = new Map<string, string>();
-      const bioCount = new Map<string, number>();
-      Object.entries(actorProfiles).forEach(([actor, profile]) => {
-        const bio = (profile.bio || '').toLowerCase().replace(/\s+/g, ' ').trim();
-        if (!bio) return;
-        normalizedBioByActor.set(actor, bio);
-        bioCount.set(bio, (bioCount.get(bio) || 0) + 1);
-      });
-
-      // Build graph from positive actions
-      const nodes = new Set<string>();
-      const edges: EdgeDefinition[] = [];
-      const positiveOut = new Map<string, Set<string>>();
-      const positiveIn = new Map<string, Set<string>>();
-      data.forEach((log) => {
-        nodes.add(log.actor);
-        nodes.add(log.target);
-        if (settings.positiveActions.includes(log.action)) {
-          edges.push({
-            data: { source: log.actor, target: log.target, type: 'interaction' },
-          });
-          if (!positiveOut.has(log.actor)) positiveOut.set(log.actor, new Set());
-          if (!positiveIn.has(log.target)) positiveIn.set(log.target, new Set());
-          positiveOut.get(log.actor)!.add(log.target);
-          positiveIn.get(log.target)!.add(log.actor);
-        }
-      });
-
-      const nodeElements: NodeDefinition[] = Array.from(nodes).map((id) => ({
-        data: { id, label: id },
-      }));
-
-      setElements([...nodeElements, ...edges]);
-
-      // Detect clusters
-      const graph: { [key: string]: string[] } = {};
-      nodes.forEach((node) => (graph[node] = []));
-      edges.forEach((edge) => {
-        graph[edge.data.source].push(edge.data.target);
-        graph[edge.data.target].push(edge.data.source);
-      });
-
-      const visited = new Set<string>();
-      const clustersList: DetailedCluster[] = [];
-      let clusterId = 0;
-      for (const node of nodes) {
-        if (!visited.has(node)) {
-          const component: string[] = [];
-          dfs(node, graph, visited, component);
-          if (component.length >= settings.minClusterSize) {
-            // Calculate density, conductance
-            const internalEdges = component.reduce((sum, n) => sum + graph[n].filter(neigh => component.includes(neigh)).length, 0) / 2;
-            const possibleEdges = (component.length * (component.length - 1)) / 2;
-            const density = possibleEdges > 0 ? internalEdges / possibleEdges : 0;
-            const externalEdges = component.reduce((sum, n) => sum + graph[n].filter(neigh => !component.includes(neigh)).length, 0);
-            const totalEdges = internalEdges + externalEdges;
-            const conductance = totalEdges > 0 ? externalEdges / totalEdges : 0;
-            clustersList.push({
-              clusterId: clusterId++,
-              members: component,
-              density,
-              conductance,
-              externalEdges,
-            });
-          }
-        }
-      }
-      setClusters(clustersList);
-
-      // Timing coordination (bin -> action -> target -> {count, actors})
-      const timeBins: Record<string, Record<string, Record<string, { count: number; actors: Set<string> }>>> = {};
-      const binSizeMs = Math.max(1, settings.timeBinMinutes) * 60 * 1000;
-      data.forEach((log) => {
-        const date = new Date(log.timestamp);
-        const bin = Math.floor(date.getTime() / binSizeMs) * binSizeMs;
-        const binKey = new Date(bin).toISOString();
-        if (!timeBins[binKey]) timeBins[binKey] = {};
-        if (!timeBins[binKey][log.action]) timeBins[binKey][log.action] = {};
-        if (!timeBins[binKey][log.action][log.target]) timeBins[binKey][log.action][log.target] = { count: 0, actors: new Set() };
-        timeBins[binKey][log.action][log.target].count++;
-        timeBins[binKey][log.action][log.target].actors.add(log.actor);
-      });
-
-      const suspiciousWaves: WaveResult[] = [];
-      Object.entries(timeBins).forEach(([time, actions]) => {
-        Object.entries(actions).forEach(([action, targets]) => {
-          Object.entries(targets).forEach(([target, info]) => {
-            const actorCount = info.actors.size;
-            if (info.count >= settings.waveMinCount && actorCount >= settings.waveMinActors) {
-              const windowEnd = new Date(new Date(time).getTime() + binSizeMs).toISOString();
-              suspiciousWaves.push({
-                windowStart: time,
-                windowEnd,
-                action,
-                target,
-                actors: Array.from(info.actors),
-                zScore: info.count / Math.max(1, settings.waveMinCount),
-              });
-            }
-          });
-        });
-      });
-      setWaves(suspiciousWaves);
-
-      // Actor scorecards
-      const actorStats: Record<string, ActorStats> = {};
-      nodes.forEach((node) => {
-        actorStats[node] = {
-          actor: node,
-          totalActions: 0,
-          churnActions: 0,
-          burstActions: 0,
-          uniqueTargets: new Set(),
-          connections: graph[node].length,
-          clusterSize: 0,
-          positiveOut: positiveOut.get(node)?.size ?? 0,
-          positiveIn: positiveIn.get(node)?.size ?? 0,
-          mutualPositive: 0,
-        };
-      });
-
-      data.forEach((log) => {
-        actorStats[log.actor].totalActions++;
-        actorStats[log.actor].uniqueTargets.add(log.target);
-        if (settings.churnActions.includes(log.action)) {
-          actorStats[log.actor].churnActions++;
-        }
-        const ts = new Date(log.timestamp).getTime();
-        if (Number.isFinite(ts)) {
-          const current = actorStats[log.actor].firstSeenMs;
-          actorStats[log.actor].firstSeenMs = current === undefined ? ts : Math.min(current, ts);
-        }
-      });
-
-      // Assign cluster sizes
-      clustersList.forEach((cluster) => {
-        cluster.members.forEach((member) => {
-          actorStats[member].clusterSize = cluster.members.length;
-        });
-      });
-
-      // Mutual (reciprocal) positive interactions
-      nodes.forEach((actor) => {
-        const outSet = positiveOut.get(actor) ?? new Set<string>();
-        let mutual = 0;
-        outSet.forEach((t) => {
-          const back = positiveOut.get(t);
-          if (back?.has(actor)) mutual++;
-        });
-        actorStats[actor].mutualPositive = mutual;
-      });
-
-      // Coordination score: fraction of actions that occur in "wave" bins
-      const waveBinsByActor = new Map<string, Set<string>>();
-      Object.entries(timeBins).forEach(([binKey, actions]) => {
-        Object.entries(actions).forEach(([action, targets]) => {
-          Object.entries(targets).forEach(([target, info]) => {
-            if (info.count >= settings.waveMinCount && info.actors.size >= settings.waveMinActors) {
-              const waveKey = `${binKey}:${action}:${target}`;
-              info.actors.forEach((actor) => {
-                if (!waveBinsByActor.has(actor)) waveBinsByActor.set(actor, new Set());
-                waveBinsByActor.get(actor)!.add(waveKey);
-              });
-            }
-          });
-        });
-      });
-      Object.keys(actorStats).forEach((actor) => {
-        actorStats[actor].burstActions = waveBinsByActor.get(actor)?.size ?? 0;
-      });
-
-      const handlePatterns = computeHandlePatternScores(Array.from(nodes));
-
-      const scorecardsList: ActorScorecard[] = Object.values(actorStats).map((stats) => {
-        const coordinationScore = stats.totalActions > 0 ? Math.min(stats.burstActions / stats.totalActions, 1) : 0;
-        const churnScore = stats.churnActions;
-        const clusterIsolationScore = stats.clusterSize > 0 ? 1 - (stats.connections / stats.clusterSize) : 0;
-        const createdAt = actorProfiles[stats.actor]?.actorCreatedAt;
-        const createdMs = createdAt ? new Date(createdAt).getTime() : undefined;
-        const firstSeenMs = stats.firstSeenMs ?? datasetStartMs;
-        const ageDays = createdMs && Number.isFinite(createdMs) ? (firstSeenMs - createdMs) / (24 * 60 * 60 * 1000) : undefined;
-        const newAccountScore = ageDays !== undefined && ageDays >= 0 && ageDays < 7 ? 1 : 0;
-        const lowDiversityScore = stats.totalActions > 0 ? 1 - (stats.uniqueTargets.size / stats.totalActions) : 0;
-        const profile = actorProfiles[stats.actor] || {};
-        const links = linksByActor.get(stats.actor) ?? normalizeLinks(profile.links || (profile.bio ? extractLinks(profile.bio) : []));
-        const suspiciousLinks = links.filter((link) => isSuspiciousDomain(link));
-        const phishingLinks = links.filter((link) => isLikelyPhishingUrl(link));
-        const sharedLinks = sharedLinksByActor.get(stats.actor) ?? [];
-        const linkDiversity = linkDiversityScore(links);
-        const reciprocalRate = stats.positiveOut > 0 ? stats.mutualPositive / stats.positiveOut : 0;
-        const burstRate = stats.totalActions > 0 ? Math.min(stats.burstActions / stats.totalActions, 1) : 0;
-        const bio = normalizedBioByActor.get(stats.actor);
-        const bioSimilarityScore = bio ? Math.min(((bioCount.get(bio) || 1) - 1) / 5, 1) : 0;
-        const handlePatternScore = handlePatterns.scoreByHandle.get(stats.actor) ?? 0;
-        const phishingLinkScore = phishingLinks.length > 0 ? Math.min(phishingLinks.length / 2, 1) : 0;
-        const profileAnomalyScore = updateProfileAnomalyScore(stats.actor, links, profile.followerCount, profile.followingCount);
-
-        const sybilScore =
-          0.30 * coordinationScore +
-          0.20 * Math.min(churnScore / 10, 1) +
-          0.15 * clusterIsolationScore +
-          0.10 * newAccountScore +
-          0.10 * lowDiversityScore +
-          0.15 * profileAnomalyScore;
-
-        const reasons: string[] = [];
-        if (sybilScore > settings.threshold) reasons.push(`Score ${sybilScore.toFixed(2)} ≥ threshold ${settings.threshold.toFixed(2)}`);
-        if (coordinationScore >= 0.5) reasons.push(`High coordination (${coordinationScore.toFixed(2)})`);
-        if (churnScore >= 5) reasons.push(`High churn (${churnScore})`);
-        if (clusterIsolationScore >= 0.5 && stats.clusterSize >= settings.minClusterSize) reasons.push(`Cluster isolation (${clusterIsolationScore.toFixed(2)}) in cluster size ${stats.clusterSize}`);
-        if (lowDiversityScore >= 0.7) reasons.push(`Low target diversity (${lowDiversityScore.toFixed(2)})`);
-        if (suspiciousLinks.length > 0) reasons.push(`Suspicious link domains (${suspiciousLinks.length})`);
-        if (phishingLinks.length > 0) reasons.push(`Phishing-like URLs (${phishingLinks.length})`);
-        if (sharedLinks.length > 0) reasons.push(`Shared links with others (${sharedLinks.length})`);
-        if (bioSimilarityScore >= 0.4) reasons.push(`Repeated bio text (${bioSimilarityScore.toFixed(2)})`);
-        if (handlePatternScore >= 0.4) reasons.push(`Handle pattern similarity (${handlePatternScore.toFixed(2)})`);
-        if (newAccountScore === 1) reasons.push('New account (<7 days)');
-        return {
-          actor: stats.actor,
-          sybilScore,
-          churnScore,
-          coordinationScore,
-          noveltyScore: newAccountScore,
-          clusterIsolationScore,
-          lowDiversityScore,
-          profileAnomalyScore,
-          links,
-          suspiciousLinks,
-          sharedLinks,
-          linkDiversity,
-          reciprocalRate,
-          burstRate,
-          newAccountScore,
-          bioSimilarityScore,
-          handlePatternScore,
-          phishingLinkScore,
-          reasons,
-        };
-      });
-      setScorecards(scorecardsList);
-      setActiveTab('results');
-    } catch (error) {
-      console.error('Error processing data:', error);
-      alert('Error processing data. Check console for details.');
-    }
-  };
-
-  const dfs = (node: string, graph: { [key: string]: string[] }, visited: Set<string>, component: string[]) => {
-    visited.add(node);
-    component.push(node);
-    for (const neighbor of graph[node]) {
-      if (!visited.has(neighbor)) {
-        dfs(neighbor, graph, visited, component);
-      }
-    }
-  };
+  // Worker-based analysis replaces the previous in-component implementation.
 
   const exportEvidence = () => {
     const blob = new Blob([evidenceJson], { type: 'application/json' });
@@ -1080,6 +789,16 @@ export default function Home() {
           <div className="bg-black/50 border border-slate-800 rounded-xl p-3 backdrop-blur">
             {sourceStatus && <div className="text-sm text-slate-200">{sourceStatus}</div>}
             {sourceError && <div className="text-sm text-red-400">{sourceError}</div>}
+            {isAnalyzing && analysisProgress && (
+              <div className="mt-2">
+                <div className="text-xs text-slate-400">
+                  {analysisProgress.stage} · {Math.round(analysisProgress.pct)}%
+                </div>
+                <div className="mt-1 h-2 w-full bg-slate-900 rounded">
+                  <div className="h-2 rounded bg-gradient-to-r from-cyan-500 via-violet-500 to-emerald-500" style={{ width: `${analysisProgress.pct}%` }} />
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1110,15 +829,15 @@ export default function Home() {
                   >
                     Add data
                   </button>
-                  <button
-                    onClick={startAnalysis}
-                    disabled={!fileUploaded || logs.length === 0}
-                    className="px-3 py-2 rounded-md bg-emerald-500 text-slate-950 text-sm font-semibold disabled:opacity-50 hover:bg-emerald-400"
-                  >
-                    Run analysis
-                  </button>
-                </div>
-              </Card>
+	                  <button
+	                    onClick={startAnalysis}
+	                    disabled={!fileUploaded || logs.length === 0 || isAnalyzing}
+	                    className="px-3 py-2 rounded-md bg-emerald-500 text-slate-950 text-sm font-semibold disabled:opacity-50 hover:bg-emerald-400"
+	                  >
+	                    {isAnalyzing ? 'Analyzing…' : 'Run analysis'}
+	                  </button>
+	                </div>
+	              </Card>
 
               <Card title="Detections" subtitle="Outputs after analysis">
                 <div className="grid grid-cols-3 gap-3 text-sm">
@@ -1479,18 +1198,18 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              <button
-                onClick={startAnalysis}
-                disabled={!fileUploaded || logs.length === 0}
-                className="px-3 py-2 rounded-md bg-emerald-500 text-slate-950 text-sm font-semibold disabled:opacity-50 hover:bg-emerald-400"
-              >
-                Run analysis
-              </button>
-              <div className="text-sm text-slate-300">
-                Loaded events: <span className="font-medium text-slate-100">{logs.length.toLocaleString()}</span>
-              </div>
-            </div>
+	            <div className="mt-4 flex flex-wrap items-center gap-2">
+	              <button
+	                onClick={startAnalysis}
+	                disabled={!fileUploaded || logs.length === 0 || isAnalyzing}
+	                className="px-3 py-2 rounded-md bg-emerald-500 text-slate-950 text-sm font-semibold disabled:opacity-50 hover:bg-emerald-400"
+	              >
+	                {isAnalyzing ? 'Analyzing…' : 'Run analysis'}
+	              </button>
+	              <div className="text-sm text-slate-300">
+	                Loaded events: <span className="font-medium text-slate-100">{logs.length.toLocaleString()}</span>
+	              </div>
+	            </div>
           </Card>
         )}
 
@@ -1849,11 +1568,31 @@ export default function Home() {
                   className="border border-slate-800 bg-slate-950/60 rounded px-2 py-1 text-sm text-slate-100 placeholder:text-slate-500"
                 />
               </div>
+              <div className="mt-2 flex items-center justify-between gap-2 text-xs text-slate-400">
+                <div>
+                  Showing page <span className="text-slate-200">{resultsPage}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setResultsPage((p) => Math.max(1, p - 1))}
+                    className="px-2 py-1 rounded border border-slate-800 bg-black/40 text-slate-200"
+                  >
+                    Prev
+                  </button>
+                  <button
+                    onClick={() => setResultsPage((p) => p + 1)}
+                    className="px-2 py-1 rounded border border-slate-800 bg-black/40 text-slate-200"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
               <ul className="mt-3 space-y-3 max-h-[720px] overflow-y-auto">
                 {(showAllActors ? scorecards : flaggedScorecards)
                   .filter((s) => (actorSearch.trim() ? s.actor.toLowerCase().includes(actorSearch.trim().toLowerCase()) : true))
                   .slice()
                   .sort((a, b) => b.sybilScore - a.sybilScore)
+                  .slice((resultsPage - 1) * resultsPageSize, resultsPage * resultsPageSize)
                   .map((s) => (
                     <li key={s.actor} className="border border-slate-800 bg-slate-950/30 rounded-lg p-3">
                       <div className="flex items-start justify-between gap-3">
