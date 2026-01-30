@@ -661,6 +661,15 @@ npm run build
 npm start
 ```
 
+### Notes (Static Export)
+
+This project uses Next.js **API routes** under `app/api/*` for URL imports, profile scanning, and synthetic data generation. Because of that, **static HTML export** (`output: 'export'` / `next export`) is not supported — deploy it as a normal Next.js server app (e.g., Vercel or a Node server).
+
+### Optional Environment Variables
+
+- `GITHUB_TOKEN`: raises GitHub rate limits for the GitHub connector.
+- `BASE_RPC_URL`: Base JSON-RPC URL for onchain fetch (you can also paste an RPC URL in the UI).
+
 ## Usage
 
 1. Upload a CSV or JSON file with the required fields: timestamp, actor, target, action, platform.

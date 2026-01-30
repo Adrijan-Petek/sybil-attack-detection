@@ -12,6 +12,7 @@ import type { AnalysisSettings, ActorScorecard, ControllerGroup, DetailedCluster
 import type { ReviewDecision } from '../lib/reviewStore';
 import { deleteReview, getAllReviews, upsertReview } from '../lib/reviewStore';
 import { addAuditEvent, clearAuditEvents, getRecentAuditEvents } from '../lib/auditStore';
+import { sanitizeLogs, type ValidationIssue } from '../lib/validate';
 import Papa from 'papaparse';
 
 // Dynamically import CytoscapeComponent to avoid SSR issues
@@ -117,6 +118,14 @@ export default function Home() {
   const [resultsPage, setResultsPage] = useState(1);
   const resultsPageSize = 50;
   const [auditEvents, setAuditEvents] = useState<Array<{ id: string; type: string; at: string; summary: string }>>([]);
+  const [notifyOnComplete, setNotifyOnComplete] = useState(true);
+  const [notifyOnHighRisk, setNotifyOnHighRisk] = useState(false);
+  const [lastValidationIssues, setLastValidationIssues] = useState<ValidationIssue[]>([]);
+  const [notificationsSupported, setNotificationsSupported] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState<'default' | 'granted' | 'denied' | 'unsupported'>('unsupported');
+  const [graphMinScore, setGraphMinScore] = useState(0);
+  const [graphFlaggedOnly, setGraphFlaggedOnly] = useState(true);
+  const [graphSearch, setGraphSearch] = useState('');
 
   type AssistantMessage = { role: 'user' | 'assistant'; text: string; at: string };
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
@@ -130,6 +139,12 @@ export default function Home() {
   useEffect(() => {
     const saved = window.localStorage.getItem('sybilShieldBaseRpcUrl');
     if (typeof saved === 'string' && saved.trim()) setBaseRpcUrl(saved);
+  }, []);
+
+  useEffect(() => {
+    const supported = typeof Notification !== 'undefined';
+    setNotificationsSupported(supported);
+    setNotificationPermission(supported ? Notification.permission : 'unsupported');
   }, []);
 
   const refreshAudit = async () => {
@@ -312,14 +327,41 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const worker = new Worker(new URL('./workers/analyzeWorker.ts', import.meta.url), { type: 'module' });
+    let worker: Worker | null = null;
+    try {
+      worker = new Worker(new URL('./workers/analyzeWorker.ts', import.meta.url), { type: 'module' });
+    } catch (e) {
+      setSourceError(e instanceof Error ? e.message : 'Failed to start analysis worker');
+      setSourceStatus(null);
+      setAnalysisWorker(null);
+      return;
+    }
+
+    const onWorkerError = (ev: ErrorEvent) => {
+      setIsAnalyzing(false);
+      setAnalysisProgress(null);
+      setSourceStatus(null);
+      setSourceError(`Analysis worker crashed: ${ev.message || 'unknown error'}`);
+    };
+
+    const onWorkerMessageError = () => {
+      setIsAnalyzing(false);
+      setAnalysisProgress(null);
+      setSourceStatus(null);
+      setSourceError('Analysis worker message error (could not deserialize).');
+    };
+
+    worker.addEventListener('error', onWorkerError);
+    worker.addEventListener('messageerror', onWorkerMessageError);
     setAnalysisWorker(worker);
     return () => {
+      worker?.removeEventListener('error', onWorkerError);
+      worker?.removeEventListener('messageerror', onWorkerMessageError);
       if (analysisListenerRef.current) {
-        worker.removeEventListener('message', analysisListenerRef.current);
+        worker?.removeEventListener('message', analysisListenerRef.current);
         analysisListenerRef.current = null;
       }
-      worker.terminate();
+      worker?.terminate();
       setAnalysisWorker(null);
     };
   }, []);
@@ -334,6 +376,38 @@ export default function Home() {
       // ignore
     }
   }, [activeTab]);
+
+	  const filteredGraphElements = useMemo(() => {
+	    if (!elements || elements.length === 0) return [];
+	    const scoreByActor = new Map<string, number>(scorecards.map((s) => [s.actor, s.sybilScore]));
+	    const q = graphSearch.trim().toLowerCase();
+	    type ElemData = { id?: unknown; source?: unknown; target?: unknown };
+	    const dataOf = (el: ElementDefinition): ElemData => (el as unknown as { data?: ElemData }).data ?? {};
+	    const keepNode = (id: string) => {
+	      const score = scoreByActor.get(id) || 0;
+	      if (graphFlaggedOnly && score <= settings.threshold) return false;
+	      if (score < graphMinScore) return false;
+	      if (q && !id.toLowerCase().includes(q)) return false;
+	      return true;
+	    };
+
+	    const nodeIds = elements.map((e) => dataOf(e).id).filter((x): x is unknown => x !== undefined && x !== null).map((x) => String(x));
+	    const kept = new Set(nodeIds.filter(keepNode));
+	    if (kept.size === 0) return [];
+
+	    const out: ElementDefinition[] = [];
+	    for (const el of elements) {
+	      const d = dataOf(el);
+	      if (d.id !== undefined && d.id !== null) {
+	        if (kept.has(String(d.id))) out.push(el);
+	      } else if (d.source !== undefined && d.source !== null && d.target !== undefined && d.target !== null) {
+	        if (kept.has(String(d.source)) && kept.has(String(d.target))) out.push(el);
+	      } else {
+	        out.push(el);
+	      }
+	    }
+	    return out;
+	  }, [elements, graphFlaggedOnly, graphMinScore, graphSearch, scorecards, settings.threshold]);
 
   const evidenceObject = useMemo(() => {
     const profileLinks = Object.fromEntries(
@@ -745,6 +819,13 @@ export default function Home() {
   };
 
   const runAnalysis = (data: LogEntry[]) => {
+    const cleaned = sanitizeLogs(data);
+    setLastValidationIssues(cleaned.report.issues);
+    if (!cleaned.report.ok) {
+      setSourceError(cleaned.report.issues.filter((i) => i.level === 'error').map((i) => i.message).join(' '));
+      setSourceStatus(null);
+      return;
+    }
     if (!analysisWorker) {
       setSourceError('Analysis worker is not ready yet. Try again in a moment.');
       return;
@@ -758,6 +839,11 @@ export default function Home() {
     }
 
     const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const dataToAnalyze = cleaned.logs;
+    if (dataToAnalyze.length !== data.length) {
+      setLogs(dataToAnalyze);
+      setFileUploaded(true);
+    }
     setAnalysisRequestId(requestId);
     setIsAnalyzing(true);
     setAnalysisProgress({ stage: 'start', pct: 0 });
@@ -780,8 +866,8 @@ export default function Home() {
     void addAuditEvent({
       type: 'analysis_run',
       at: new Date().toISOString(),
-      summary: `Analysis run: ${data.length.toLocaleString()} events, threshold ${settings.threshold.toFixed(2)}`,
-      meta: { count: data.length, settings, seedActorsCount: seedActors.length },
+      summary: `Analysis run: ${dataToAnalyze.length.toLocaleString()} events, threshold ${settings.threshold.toFixed(2)}`,
+      meta: { count: dataToAnalyze.length, settings, seedActorsCount: seedActors.length },
     }).then(refreshAudit);
 
     type WorkerProgress = { type: 'progress'; requestId: string; stage: string; pct: number };
@@ -793,9 +879,28 @@ export default function Home() {
     type WorkerError = { type: 'error'; requestId: string; error: string };
     type WorkerMsg = WorkerProgress | WorkerResult | WorkerError;
 
+    let sawAnyWorkerMessage = false;
+    const watchdog = window.setTimeout(() => {
+      if (sawAnyWorkerMessage) return;
+      setIsAnalyzing(false);
+      setAnalysisProgress(null);
+      setSourceStatus(null);
+      setSourceError('Analysis worker did not respond. If this keeps happening, reload the page or relax your CSP (worker-src).');
+      try {
+        analysisWorker.postMessage({ type: 'cancel', requestId });
+      } catch {
+        // ignore
+      }
+      if (analysisListenerRef.current) {
+        analysisWorker.removeEventListener('message', analysisListenerRef.current);
+        analysisListenerRef.current = null;
+      }
+    }, 6000);
+
     const onMessage = (ev: MessageEvent<WorkerMsg>) => {
       const msg = ev.data;
       if (!msg || msg.requestId !== requestId) return;
+      sawAnyWorkerMessage = true;
 
       if (msg.type === 'progress') {
         setAnalysisProgress({ stage: msg.stage || 'progress', pct: msg.pct ?? 0 });
@@ -803,6 +908,7 @@ export default function Home() {
       }
 
       if (msg.type === 'result') {
+        window.clearTimeout(watchdog);
         setElements(msg.result.elements || []);
         setClusters(msg.result.clusters || []);
         setWaves(msg.result.waves || []);
@@ -811,6 +917,25 @@ export default function Home() {
         setIsAnalyzing(false);
         setAnalysisProgress({ stage: 'done', pct: 100 });
         setSourceStatus('Analysis complete');
+        try {
+          if (notifyOnComplete && typeof Notification !== 'undefined') {
+            if (Notification.permission === 'default') {
+              void Notification.requestPermission()
+                .then((perm) => setNotificationPermission(perm))
+                .catch(() => {});
+            }
+            if (Notification.permission === 'granted') {
+              setNotificationPermission('granted');
+              const flagged = (msg.result.scorecards || []).filter((s) => s.sybilScore > settings.threshold).length;
+              const highRisk = (msg.result.scorecards || []).filter((s) => s.sybilScore >= 0.9).length;
+              const title = `Sybil Shield: ${flagged} flagged`;
+              const body = notifyOnHighRisk && highRisk > 0 ? `${highRisk} high-risk actor(s) ≥ 0.90` : `Threshold ${settings.threshold.toFixed(2)}`;
+              new Notification(title, { body });
+            }
+          }
+        } catch {
+          // ignore
+        }
         analysisWorker.removeEventListener('message', onMessage);
         analysisListenerRef.current = null;
         setActiveTab('results');
@@ -818,6 +943,7 @@ export default function Home() {
       }
 
       if (msg.type === 'error') {
+        window.clearTimeout(watchdog);
         setIsAnalyzing(false);
         setSourceStatus(null);
         setSourceError(msg.error || 'Analysis failed');
@@ -828,7 +954,7 @@ export default function Home() {
 
     analysisWorker.addEventListener('message', onMessage);
     analysisListenerRef.current = onMessage;
-    analysisWorker.postMessage({ type: 'analyze', requestId, logs: data, settings: settingsToSend });
+    analysisWorker.postMessage({ type: 'analyze', requestId, logs: dataToAnalyze, settings: settingsToSend });
   };
 
   const appendLogs = (newLogs: LogEntry[], label: string) => {
@@ -2216,6 +2342,53 @@ export default function Home() {
                   {isAnalyzing ? 'Analyzing…' : 'Run analysis'}
                 </button>
               </div>
+
+              <div className="mt-4 border-t border-slate-800 pt-3">
+                <div className="text-sm text-slate-200 font-medium">Notifications</div>
+                <div className="mt-2 flex flex-wrap items-center gap-3">
+                  <label className="text-xs text-slate-300 flex items-center gap-2">
+                    <input type="checkbox" checked={notifyOnComplete} onChange={(e) => setNotifyOnComplete(e.target.checked)} />
+                    Notify on completion
+                  </label>
+                  <label className="text-xs text-slate-300 flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={notifyOnHighRisk}
+                      onChange={(e) => setNotifyOnHighRisk(e.target.checked)}
+                      disabled={!notifyOnComplete}
+                    />
+                    Include high-risk count
+                  </label>
+                  <button
+                    onClick={async () => {
+                      if (!notificationsSupported || typeof Notification === 'undefined') return;
+                      const perm = await Notification.requestPermission();
+                      setNotificationPermission(perm);
+                    }}
+                    disabled={!notificationsSupported}
+                    className="px-3 py-1.5 rounded border border-slate-800 bg-black/40 text-slate-200 text-xs hover:bg-slate-900/50 disabled:opacity-50"
+                  >
+                    Enable
+                  </button>
+                  <span className="text-xs text-slate-500">
+                    {notificationsSupported ? `Permission: ${notificationPermission}` : 'Not supported in this browser'}
+                  </span>
+                </div>
+                <div className="mt-1 text-xs text-slate-500">No data leaves your machine; this uses browser notifications only.</div>
+              </div>
+
+              {lastValidationIssues.length > 0 && (
+                <div className="mt-4 border-t border-slate-800 pt-3">
+                  <div className="text-sm text-slate-200 font-medium">Data quality notes</div>
+                  <ul className="mt-2 text-xs text-slate-400 space-y-1">
+                    {lastValidationIssues.slice(0, 5).map((i, idx) => (
+                      <li key={`${i.level}-${idx}`} className={i.level === 'error' ? 'text-red-400' : 'text-slate-400'}>
+                        {i.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </Card>
 
             <Card title="How scoring works" subtitle="Explainable, human-readable signals">
@@ -2311,9 +2484,33 @@ export default function Home() {
 
         {activeTab === 'graph' && (
           <Card title="Graph" subtitle="Red nodes are above your threshold">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <label className="text-xs text-slate-300 flex items-center gap-2">
+                <input type="checkbox" checked={graphFlaggedOnly} onChange={(e) => setGraphFlaggedOnly(e.target.checked)} />
+                Flagged only
+              </label>
+              <label className="text-xs text-slate-300 flex items-center gap-2">
+                Min score
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={graphMinScore}
+                  onChange={(e) => setGraphMinScore(Math.max(0, Math.min(1, Number.parseFloat(e.target.value || '0') || 0)))}
+                  className="w-20 border border-slate-800 bg-slate-950/60 rounded px-2 py-1 text-xs text-slate-100"
+                />
+              </label>
+              <input
+                value={graphSearch}
+                onChange={(e) => setGraphSearch(e.target.value)}
+                placeholder="Search actor…"
+                className="flex-1 min-w-[220px] border border-slate-800 bg-slate-950/60 rounded px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500"
+              />
+            </div>
             <div style={{ width: '100%', height: '640px' }}>
               <CytoscapeComponent
-                elements={elements}
+                elements={filteredGraphElements}
                 cy={(cy: unknown) => {
                   cyRef.current = cy;
                 }}
