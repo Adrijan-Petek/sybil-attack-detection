@@ -1,8 +1,8 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
-  output: 'export',
-  trailingSlash: true,
+  // output: 'export', // Disabled for API routes
+  // trailingSlash: true,
   async headers() {
     const csp = [
       "default-src 'self'",
