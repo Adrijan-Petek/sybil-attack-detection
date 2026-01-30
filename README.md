@@ -91,13 +91,62 @@ Optional (used by extra signals if provided):
 - `location` (string)
 - `amount`, `txHash`, `blockNumber`, `meta`, `targetType`
 
+## How to Use Sybil Shield
+
+### Step-by-Step Guide
+
+1. **Install and Run**:
+   ```bash
+   npm install
+   npm run dev
+   ```
+   Open `http://localhost:3000` in your browser.
+
+2. **Prepare Your Data**:
+   - Ensure your logs are in CSV or JSON format with the required fields: `timestamp`, `platform`, `action`, `actor`, `target`.
+   - Optional fields like `bio`, `links`, `amount` enhance detection.
+
+3. **Upload Data**:
+   - Go to the **Data** tab.
+   - Upload your CSV/JSON file, or paste URLs to import, or scan profile pages.
+   - For GitHub repos, use the fetch feature with `owner/repo`.
+
+4. **Configure Analysis**:
+   - Switch to the **Analysis** tab.
+   - Adjust settings: threshold (e.g., 0.6), min cluster size (e.g., 5), time bin minutes (e.g., 5), rapid actions threshold (e.g., 10/min).
+   - Click "Start Analysis" to run the detection pipeline.
+
+5. **Review Results**:
+   - **Dashboard**: Overview of actors, actions, suspicious domains.
+   - **Graph**: Visualize interactions and clusters.
+   - **Results**: Search and filter flagged actors, see "why flagged" reasons.
+   - **Mini-App**: Specific stats for mini-app risks.
+   - **Review**: Confirm/dismiss flags with notes.
+
+6. **Export Evidence**:
+   - Go to **Evidence** tab.
+   - Download JSON or copy summary for reporting.
+
+### Interpreting Signals
+
+- **Sybil Score > Threshold**: Actor is flagged. Reasons include high coordination, churn, isolation, etc.
+- **Clusters**: Groups of densely connected actors (farms).
+- **Waves**: Coordinated bursts of actions.
+- **Mini-App Signals**: Shared wallets indicate farms; high sessions suggest bots.
+
+### Advanced Usage
+
+- Use the **Generator** tab to create synthetic data for testing.
+- The **Assistant** tab answers questions about signals without external calls.
+- **History** tab tracks your analysis runs locally.
+
 ## Detection outputs
 
 The Evidence pack includes:
 
 - `clusters`: connected components + density/conductance metrics
 - `waves`: burst events per **action + target** in fixed bins **and** sliding-window bursts (harder to evade)
-- `controllers`: multi-account “likely same operator” groups (entity resolution across platforms/wallets/links)
+- `controllers`: multi-account "likely same operator" groups (entity resolution across platforms/wallets/links)
 - `scorecards`: per-actor scores + link stats + "why flagged" reasons (now includes velocity, action-sequence repetition, circadian anomalies, controller id/evidence)
 - `profileLinks`: all scanned links per actor (suspicious/shared)
 - `insights`: top targets, top suspicious domains, shared links, handle patterns, top waves
@@ -150,6 +199,22 @@ If you confirm a handful of accounts as Sybil in **Review** (set decision to `co
 
 Sybil farms often reuse the same playbook and hit the same targets. Sybil Shield computes per-actor **max target-set Jaccard similarity** to surface accounts that behave like duplicates (useful for ranking manipulation and mini-app reward farming).
 
+### Research notes (why these signals)
+
+- **SybilGuard (2006)**: social-network trust graphs can limit Sybils by leveraging fast-mixing honest regions.
+- **SybilLimit (2008)**: improves scalability/guarantees over SybilGuard for large networks.
+- **SybilRank (2012)**: ranking-based approach that propagates trust from seeds via random walks.
+
+Sybil Shield uses pragmatic, local-first versions of these ideas:
+- graph + clustering for structure
+- seed-based propagation (from your reviews) for human-in-the-loop trust/suspicion diffusion
+- explainable timing + behavior signals for coordination farms
+
+## Security hardening
+
+- API routes use **rate limiting** and **SSRF protections** (blocks localhost/private IPs for URL imports/scans).
+- The app ships common **security headers** (CSP, COOP/CORP, HSTS, etc.) via `next.config.ts`.
+
 - **Waves**: many actions in the same time bin, on the same target
 - **Churn**: heavy `unfollow/unstar` behavior
 - **Low target diversity**: actions concentrated on a small number of targets
@@ -170,14 +235,17 @@ Sybil farms often reuse the same playbook and hit the same targets. Sybil Shield
 
 ### Added Detection Functions
 
-The following functions have been added to `lib/analyze.ts` for enhanced detection:
+The following functions have been added to `lib/analyze.ts` for enhanced detection, particularly for mini-app ecosystems:
 
-- `detectSharedWallets(logs)`: Maps actors to shared wallet addresses from meta fields.
-- `detectCrossAppLinking(logs)`: Identifies actors active on multiple platforms.
-- `detectSessionAnomalies(logs, thresholdMs)`: Counts sessions based on time gaps, flagging high session counts.
-- `detectFraudulentTransactions(logs)`: Analyzes transaction amounts for anomalies like high variance.
+- `detectSharedWallets(logs: LogEntry[])`: Scans the `meta` field for wallet addresses (e.g., starting with '0x'). Groups actors sharing the same wallets, indicating coordinated farms. Returns a map of actors to their shared wallets.
 
-These are integrated into the scoring model with weights for sharedWalletScore, crossAppScore, sessionScore, and fraudScore.
+- `detectCrossAppLinking(logs: LogEntry[])`: Groups actors by platform activity. Actors active on multiple platforms are flagged for potential cross-app coordination. Returns a map of actors to their active platforms.
+
+- `detectSessionAnomalies(logs: LogEntry[], thresholdMs: number = 300000)`: Analyzes action timestamps to detect sessions (groups of actions within time gaps). High session counts suggest bot-like behavior. Returns a map of actors to session counts.
+
+- `detectFraudulentTransactions(logs: LogEntry[])`: For logs with `amount`, calculates variance in transaction amounts per actor. High variance or uniform small amounts indicate fraudulent patterns. Returns a map of actors to fraud scores (0-1).
+
+These functions are called during analysis and their results are integrated into the scoring model with weights: sharedWalletScore (0.05), crossAppScore (0.05), sessionScore (0.05), fraudScore (0.05). They contribute to "why flagged" reasons in the evidence pack.
 
 ## Threat model and boundaries
 
