@@ -114,6 +114,9 @@ export type ActorScorecard = {
   topAmountBucket: string;
   topAmountBucketCount: number;
   sharedAmountBucketActors: number;
+  tradeChurnScore: number;
+  tradeFlipTargetsCount: number;
+  medianTradeFlipSeconds: number;
   avgSessionMinutes: number;
   avgSessionGapMinutes: number;
   maxSessionGapMinutes: number;
@@ -479,6 +482,7 @@ export function analyzeLogs(input: { logs: LogEntry[]; settings: AnalysisSetting
   const botnetByActor = computeBotnetPatternByActor(ngramByActor);
   const cadenceByActor = computeCadenceByActor(logs);
   const amountFpByActor = detectAmountFingerprints(logs);
+  const tradeChurnByActor = detectTradeChurn(logs);
 
   // Cross-actor similarity (same targets == coordinated ops / multi-account)
   const maxJaccardByActor = new Map<string, { score: number; peer: string }>();
@@ -669,6 +673,7 @@ export function analyzeLogs(input: { logs: LogEntry[]; settings: AnalysisSetting
       topAmountBucketCount: 0,
       sharedAmountBucketActors: 0,
     };
+    const tradeChurn = tradeChurnByActor.get(stats.actor) ?? { tradeChurnScore: 0, flipTargetsCount: 0, medianFlipSeconds: 0 };
 
     const session = sessionMetrics.get(stats.actor) ?? {
       sessionCount: 0,
@@ -698,6 +703,7 @@ export function analyzeLogs(input: { logs: LogEntry[]; settings: AnalysisSetting
         0.04 * botnet.botnetScore +
         0.03 * cadence.cadenceScore +
         0.04 * amountFp.amountFingerprintScore +
+        0.04 * tradeChurn.tradeChurnScore +
         0.03 * circadian.circadianScore +
         0.05 * (jacc.score >= 0.85 && stats.uniqueTargets.size >= 3 ? Math.min((jacc.score - 0.85) / 0.15, 1) : 0) +
         seedInfluence * seedProximityScore +
@@ -732,6 +738,8 @@ export function analyzeLogs(input: { logs: LogEntry[]; settings: AnalysisSetting
       reasons.push(`Synchronized cadence (median gap ~${Math.round(cadence.medianGapSeconds)}s) across ${cadence.groupSize} actors`);
     if (amountFp.amountFingerprintScore >= 0.6 && amountFp.topAmountBucket)
       reasons.push(`Shared amount fingerprint (${amountFp.topAmountBucket}) across ${amountFp.sharedAmountBucketActors} actors`);
+    if (tradeChurn.tradeChurnScore >= 0.6 && tradeChurn.flipTargetsCount > 0)
+      reasons.push(`Trade ping-pong / wash-like flips (${tradeChurn.flipTargetsCount} target(s), median flip ~${Math.round(tradeChurn.medianFlipSeconds)}s)`);
     if (circadian.circadianScore >= 0.8) reasons.push(`Unnatural circadian pattern (active hours ${circadian.activeHours})`);
     if (jacc.score >= 0.85 && stats.uniqueTargets.size >= 3 && jacc.peer) reasons.push(`Very similar targets to ${jacc.peer} (Jaccard ${jacc.score.toFixed(2)})`);
     if (seedInfluence > 0 && seedProximityScore >= 0.5) reasons.push(`Near confirmed sybil(s) (seed proximity ${seedProximityScore.toFixed(2)})`);
@@ -788,6 +796,9 @@ export function analyzeLogs(input: { logs: LogEntry[]; settings: AnalysisSetting
       topAmountBucket: amountFp.topAmountBucket,
       topAmountBucketCount: amountFp.topAmountBucketCount,
       sharedAmountBucketActors: amountFp.sharedAmountBucketActors,
+      tradeChurnScore: tradeChurn.tradeChurnScore,
+      tradeFlipTargetsCount: tradeChurn.flipTargetsCount,
+      medianTradeFlipSeconds: tradeChurn.medianFlipSeconds,
       avgSessionMinutes: session.avgSessionMinutes,
       avgSessionGapMinutes: session.avgGapMinutes,
       maxSessionGapMinutes: session.maxGapMinutes,
@@ -854,10 +865,18 @@ export function detectSharedWallets(logs: LogEntry[]): Map<string, string[]> {
 }
 
 export function detectCrossAppLinking(logs: LogEntry[]): Map<string, string[]> {
+  const normalize = (p: string) => {
+    const x = String(p || '').trim().toLowerCase();
+    if (x === 'twitter') return 'x';
+    if (x === 'x.com') return 'x';
+    if (x === 'twitter.com') return 'x';
+    if (x.startsWith('binance')) return 'binance';
+    return x;
+  };
   const actorToPlatforms = new Map<string, Set<string>>();
   logs.forEach(log => {
     if (!actorToPlatforms.has(log.actor)) actorToPlatforms.set(log.actor, new Set());
-    actorToPlatforms.get(log.actor)!.add(log.platform);
+    actorToPlatforms.get(log.actor)!.add(normalize(log.platform));
   });
   const crossAppActors = new Map<string, string[]>();
   actorToPlatforms.forEach((platforms, actor) => {
@@ -1317,6 +1336,84 @@ export function detectAmountFingerprints(
     });
   });
 
+  return out;
+}
+
+export function detectTradeChurn(
+  logs: LogEntry[],
+): Map<string, { tradeChurnScore: number; flipTargetsCount: number; medianFlipSeconds: number }> {
+  const isTradeAction = (a: string) => {
+    const x = String(a || '').toLowerCase();
+    return x === 'buy' || x === 'sell' || x === 'trade' || x === 'swap';
+  };
+
+  const perActorTarget = new Map<string, Array<{ ts: number; side: 'buy' | 'sell' | 'other' }>>();
+  for (const log of logs) {
+    if (!isTradeAction(log.action)) continue;
+    const ts = new Date(log.timestamp).getTime();
+    if (!Number.isFinite(ts)) continue;
+    const actor = String(log.actor || '').trim();
+    const target = String(log.target || '').trim();
+    if (!actor || !target) continue;
+    const action = String(log.action || '').toLowerCase();
+    const side: 'buy' | 'sell' | 'other' = action === 'buy' ? 'buy' : action === 'sell' ? 'sell' : 'other';
+    const key = `${actor}||${target}`;
+    if (!perActorTarget.has(key)) perActorTarget.set(key, []);
+    perActorTarget.get(key)!.push({ ts, side });
+  }
+
+  const actorScores = new Map<string, { score: number; flipTargets: number; gaps: number[] }>();
+
+  perActorTarget.forEach((events, key) => {
+    if (events.length < 10) return;
+    events.sort((a, b) => a.ts - b.ts);
+    let buys = 0;
+    let sells = 0;
+    const flipGaps: number[] = [];
+    for (let i = 0; i < events.length; i++) {
+      if (events[i].side === 'buy') buys++;
+      if (events[i].side === 'sell') sells++;
+      if (i === 0) continue;
+      const prev = events[i - 1];
+      const cur = events[i];
+      if ((prev.side === 'buy' && cur.side === 'sell') || (prev.side === 'sell' && cur.side === 'buy')) {
+        const gapS = (cur.ts - prev.ts) / 1000;
+        if (Number.isFinite(gapS) && gapS >= 0) flipGaps.push(gapS);
+      }
+    }
+
+    const total = events.length;
+    const churnRatio = total > 0 ? Math.min(buys, sells) / total : 0;
+    if (churnRatio < 0.25) return;
+    if (flipGaps.length < 3) return;
+
+    flipGaps.sort((a, b) => a - b);
+    const mid = Math.floor(flipGaps.length / 2);
+    const medianFlip = flipGaps.length % 2 === 0 ? (flipGaps[mid - 1] + flipGaps[mid]) / 2 : flipGaps[mid];
+
+    const speedScore = medianFlip <= 120 ? Math.min((120 - medianFlip) / 120, 1) : 0;
+    const volumeScore = Math.min((total - 10) / 40, 1);
+    const score = Math.min(0.6 * speedScore + 0.4 * volumeScore + 0.5 * churnRatio, 1);
+    if (score <= 0) return;
+
+    const actor = key.split('||')[0];
+    if (!actorScores.has(actor)) actorScores.set(actor, { score: 0, flipTargets: 0, gaps: [] });
+    const cur = actorScores.get(actor)!;
+    cur.score = Math.max(cur.score, score);
+    cur.flipTargets += 1;
+    cur.gaps.push(medianFlip);
+  });
+
+  const out = new Map<string, { tradeChurnScore: number; flipTargetsCount: number; medianFlipSeconds: number }>();
+  actorScores.forEach((v, actor) => {
+    const g = v.gaps.slice().sort((a, b) => a - b);
+    const medianGap = (() => {
+      if (g.length === 0) return 0;
+      const mid = Math.floor(g.length / 2);
+      return g.length % 2 === 0 ? (g[mid - 1] + g[mid]) / 2 : g[mid];
+    })();
+    out.set(actor, { tradeChurnScore: v.score, flipTargetsCount: v.flipTargets, medianFlipSeconds: medianGap });
+  });
   return out;
 }
 

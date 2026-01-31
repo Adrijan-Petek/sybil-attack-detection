@@ -1,53 +1,187 @@
-# Sybil Shield (Sybil Attack Detection)
+# Sybil Shield
 
-Sybil Shield is a **local-first** Next.js app that helps you detect **coordinated farms** (Sybil clusters), **scammer patterns**, and **mini-app attacks** across social, onchain, and mini-app systems using explainable graph + timing + profile + behavioral signals.
+[![Build Status](https://github.com/yourusername/sybil-attack-detection/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/sybil-attack-detection/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Next.js](https://img.shields.io/badge/Next.js-16.1.6-black)](https://nextjs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org/)
 
-It’s designed for **human review**: you get an evidence pack with "why flagged" reasons, not automatic bans. Now includes enhanced protection for mini-apps, where most Sybil attacks occur via rapid interactions, wallet clusters, and cross-platform coordination.
+## Demo Video
 
-## What this catches (and why it works)
+<video width="100%" controls>
+  <source src="promo.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
 
-Sybil attackers typically optimize for scale and coordination:
+Sybil Shield is a powerful, local-first Next.js application designed for detecting coordinated Sybil attacks, scammer patterns, and mini-app exploits across social, onchain, and mini-app ecosystems. Built for human review, it provides explainable evidence packs with "why flagged" reasons, empowering analysts to make informed decisions without automatic bans.
 
-- **Dense internal graphs** with limited external connectivity (farms)
-- **Bursty, synchronized actions** (waves) to manipulate rankings, airdrops, or reputation
-- **Low diversity** (many actions against few targets) and repetitive behavior
-- **Reusable templates**: similar handles, repeated bios, shared links, same domains
-- **Mini-app specific**: shared wallets, cross-app linking, session anomalies, fraudulent transaction patterns, rapid interactions, low target entropy
+This tool excels at identifying hard-to-fake signals such as dense internal graphs, synchronized bursts (waves), low diversity behaviors, and reusable identity templates. Enhanced with mini-app specific detections, it uncovers shared wallets, cross-platform coordination, session anomalies, and fraudulent transaction patterns.
 
-This project focuses on signals that are **harder to fake** without losing the attacker’s operational efficiency, now extended to mini-app ecosystems.
+## Table of Contents
 
-## UI (Tabs)
+- [Features](#features)
+- [Supported Platforms](#supported-platforms)
+- [Quick Start](#quick-start)
+- [Data Ingestion](#data-ingestion)
+- [Usage Guide](#usage-guide)
+- [Detection Signals](#detection-signals)
+- [API Endpoints](#api-endpoints)
+- [Project Structure](#project-structure)
+- [Contributing](#contributing)
+- [License](#license)
 
-- **Dashboard**: key counts + cheat-catching insights (top targets, suspicious domains, shared links, handle patterns)
-- **Data**: upload logs, fetch GitHub, import URLs, scan profile pages for data files
-- **Generator**: create synthetic attack data for testing
-- **Analysis**: settings + scoring explanation
-- **Assistant**: local-first Q&A for interpreting signals (no external APIs)
-- **Graph**: interaction visualization
-- **Results**: clusters, waves, searchable actor scorecards with "why flagged"
-- **Review**: human review mode with confirm/dismiss and notes (IndexedDB storage)
-- **Evidence**: copy/download the full JSON evidence pack
-- **Mini-App**: dedicated stats and top risks for mini-app Sybil detection (shared wallets, cross-app activity, sessions, fraud, rapid actions, entropy)
-- **History**: local audit trail of runs/imports/scans/exports (IndexedDB)
+## Features
 
-## Quickstart
+- **Local-First Architecture**: All analysis runs in the browser with IndexedDB storage for reviews and audit trails.
+- **Explainable AI**: Every flag includes detailed "why flagged" reasons, avoiding black-box decisions.
+- **Graph Visualization**: Interactive Cytoscape.js graphs for interaction networks and clusters.
+- **Multi-Platform Support**: Handles GitHub, Farcaster, Talent Protocol, Base (onchain), Binance, X (Twitter), and custom platforms.
+- **Mini-App Protections**: Specialized detections for shared wallets, cross-app linking, session anomalies, and fraudulent transactions.
+- **Human-in-the-Loop**: Review mode for confirming/dismissing flags with notes and semi-supervised seed expansion.
+- **Evidence Export**: Downloadable JSON packs for reporting and auditing.
+- **Synthetic Data Generation**: Create test datasets for validation.
+- **Rate-Limited APIs**: Secure URL imports and profile scans with SSRF protections.
+
+## Supported Platforms
+
+Sybil Shield supports detection across multiple platforms, with specific mappings for optimal results:
+
+- **GitHub**: Stars, follows, forks, issues, PRs.
+- **Farcaster**: Follows, likes, recasts, replies.
+- **Talent Protocol**: Endorsements, scores.
+- **Base (Onchain)**: Transfers, swaps, mints, approvals.
+- **Binance**: Trades, buys, sells, transfers (crypto exchange activities).
+- **X (Twitter)**: Follows, unfollows, likes, retweets, replies.
+- **Mini-Apps**: Taps, claims, rewards, invites, purchases.
+- **Custom**: Any platform normalized to the schema.
+
+### Platform-Specific Data Fetching
+
+- **GitHub**: Fetch stargazers via API (`app/api/fetch/github/route.ts`).
+- **Farcaster**: Stub for Neynar API integration.
+- **Talent Protocol**: Stub for talent scores.
+- **Base**: Stub for RPC-based transfers.
+- **Binance**: Planned API integration for trade logs (requires API key).
+- **X (Twitter)**: Planned API integration for activity logs (requires API key).
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18+
+- npm or yarn
+
+### Installation
 
 ```bash
+git clone https://github.com/yourusername/sybil-attack-detection.git
+cd sybil-attack-detection
 npm install
+```
+
+### Running Locally
+
+```bash
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open [http://localhost:3000](http://localhost:3000) to access the app.
 
-Optional environment variables:
+### Optional Environment Variables
 
-- `GITHUB_TOKEN` – increases GitHub API rate limits for fetching stargazers
+- `GITHUB_TOKEN`: Increases GitHub API rate limits.
+- `BASE_RPC_URL`: For onchain data fetching.
+- `BINANCE_API_KEY`: For Binance trade data (future).
+- `TWITTER_BEARER_TOKEN`: For X (Twitter) data (future).
 
-## Getting data into the system
+## Data Ingestion
 
-### 1) Upload CSV or JSON
+### Upload CSV/JSON
 
-Upload a file with events. The app parses and analyzes locally in the browser.
+Upload files with events. Required fields: `timestamp`, `platform`, `action`, `actor`, `target`.
+
+### Import from URLs
+
+Paste links containing data. Supports resolvers for GitHub, Gist, GitLab, Bitbucket, Google Drive, Dropbox, OneDrive, HuggingFace, Google Sheets, Pastebin.
+
+### Scan Profile Pages
+
+Provide profile URLs to auto-discover and ingest CSV/JSON data files.
+
+### Fetch from Platforms
+
+- GitHub: Enter `owner/repo` to fetch stargazers.
+- Future: Binance and X integrations for direct API pulls.
+
+## Event Schema
+
+### Required Fields
+
+- `timestamp` (ISO8601)
+- `platform` (e.g., `github`, `farcaster`, `base`, `talent`, `binance`, `x`)
+- `action` (e.g., `follow`, `star`, `transfer`, `trade`, `like`)
+- `actor` (handle or wallet)
+- `target` (user/repo/wallet/etc.)
+
+### Optional Fields
+
+- `amount`, `txHash`, `blockNumber`, `meta`, `actorCreatedAt`, `bio`, `links`, `followerCount`, `followingCount`, `verified`, `location`, `targetType`
+
+## Usage Guide
+
+1. **Ingest Data**: Upload files, import URLs, scan profiles, or fetch from platforms.
+2. **Configure Analysis**: Adjust thresholds and settings.
+3. **Run Analysis**: Process data with clustering, waves, and scoring.
+4. **Review Results**: Explore graphs, clusters, waves, and actor scorecards.
+5. **Export Evidence**: Download JSON packs for reporting.
+
+## Detection Signals
+
+### Core Signals
+
+- **Clusters**: Dense groups with low external connectivity.
+- **Waves**: Coordinated bursts in time bins.
+- **Churn**: High unfollow/unstar rates.
+- **Low Diversity**: Concentrated actions on few targets.
+- **Profile Anomalies**: Suspicious domains, shared links, handle patterns.
+
+### Mini-App Specific
+
+- **Shared Wallets**: Actors using common addresses.
+- **Cross-App Linking**: Multi-platform activity.
+- **Session Anomalies**: Frequent short sessions.
+- **Fraudulent Transactions**: Unusual amount patterns.
+
+### Platform Additions
+
+- **Binance**: Wash trading detection via repeated counterparty patterns.
+- **X (Twitter)**: Brigading and astroturfing via synchronized likes/retweets.
+
+## API Endpoints
+
+- `/api/fetch/github`: GitHub stargazer fetch.
+- `/api/fetch/base`: Base transfer fetch (stub).
+- `/api/fetch/farcaster`: Farcaster data (stub).
+- `/api/fetch/talent`: Talent scores (stub).
+- `/api/fetch/binance`: Binance trades (planned).
+- `/api/fetch/x`: X activity (planned).
+- `/api/import/url`: URL-based imports.
+- `/api/scan/profile`: Profile scanning.
+- `/api/generate/synthetic`: Synthetic data creation.
+
+## Project Structure
+
+- `app/`: Next.js pages and API routes.
+- `lib/`: Core logic (analyze.ts, profile.ts, scam.ts, etc.).
+- `public/`: Static assets.
+- `scripts/`: Utility scripts for snapshots.
+
+## Contributing
+
+Contributions welcome! See issues for roadmap items like ML enhancements, new platform integrations, and performance optimizations.
+
+## License
+
+MIT License. See LICENSE for details.
 
 ### 2) Import from URLs (works with “everything”)
 
@@ -186,7 +320,7 @@ To uncover “many accounts / many wallets” controlled by one operator, the an
 - Same wallet disclosed/used across profiles
 - Common funder patterns onchain (seed wallet → many wallets)
 - Shared links and uncommon shared domains across profiles
-- Same handle across platforms (e.g., `github:alice`, `twitter:alice`)
+- Same handle across platforms (e.g., `github:alice`, `x:alice` — `twitter:*` is treated as alias)
 - Large handle-stem clusters (template reuse)
 
 These groups are **not accusations** — they’re ranked leads for human review and evidence export.
@@ -320,496 +454,4 @@ These functions are called during analysis and their results are integrated into
 
 MIT
 
-Only positive edges contribute to cluster topology.
-Negative edges are used exclusively for churn and wave detection.
 
-Expand with ML: Centrality measures, DBSCAN on features.
-
-### Open-Source Inspirations
-
-- [ArbitrumFoundation/sybil-detection](https://github.com/ArbitrumFoundation/sybil-detection): On-chain graph partitioning.
-- [TrustaLabs/Airdrop-Sybil-Identification](https://github.com/TrustaLabs/Airdrop-Sybil-Identification): Python ML for sybil clusters.
-- [forkoooor/Sybil-Defender](https://github.com/forkoooor/Sybil-Defender): EVM chain monitoring.
-- Farcaster-specific: Graph ML papers and Optimism grants.
-
-## CSV/JSON Schema
-
-### Required Fields
-
-- `timestamp` (ISO8601 string, e.g., `2023-01-01T10:00:00Z`)
-- `platform` (string: `github`, `farcaster`, `base`, `binance`, or custom)
-- `action` (string: `follow`, `unfollow`, `star`, `unstar`, `transfer`, `swap`, `comment`, `fork`, `pr`, `issue`, `endorse`, `score`)
-- `actor` (string: user handle or wallet address)
-- `target` (string: user/repo/wallet/contract)
-
-### Optional Fields
-
-- `amount` (number: for weighting edges, e.g., transfer amount or star value)
-- `txHash` (string: blockchain transaction hash)
-- `blockNumber` (number: for onchain ordering)
-- `meta` (JSON string: extra data like `{"repo": "owner/repo", "chainId": 8453, "token": "ETH"}`)
-- `actorCreatedAt` (ISO8601: account creation time for age analysis)
-- `followerCount` (number: current follower count for ratio analysis)
-- `followingCount` (number: current following count for ratio analysis)
-- `bio` (string: user bio text for pattern analysis)
-- `location` (string: user location for geographic clustering)
-- `verified` (boolean: if account is verified)
-- `links` (array of strings: URLs from bio or profile)
-- `targetType` (string: `repo`, `user`, `wallet`, etc.)
-
-### Example CSV Snippet
-
-```csv
-timestamp,platform,action,actor,target,amount,meta
-2023-01-01T10:00:00Z,github,follow,user1,user2,,{"repo": "example/repo"}
-2023-01-01T10:01:00Z,github,star,user2,example/repo,,
-2023-01-01T10:02:00Z,base,transfer,0x123...,0x456...,1000,{"chainId": 8453, "token": "ETH"}
-2023-01-01T10:03:00Z,talent,endorse,user3,user4,,{"score": 85}
-2023-01-01T10:04:00Z,farcaster,follow,user5,user6,,
-```
-
-### Example JSON Array
-
-```json
-[
-  {
-    "timestamp": "2023-01-01T10:00:00Z",
-    "platform": "github",
-    "action": "follow",
-    "actor": "user1",
-    "target": "user2",
-    "meta": "{\"repo\": \"example/repo\"}"
-  },
-  {
-    "timestamp": "2023-01-01T10:01:00Z",
-    "platform": "github",
-    "action": "star",
-    "actor": "user2",
-    "target": "example/repo"
-  },
-  {
-    "timestamp": "2023-01-01T10:02:00Z",
-    "platform": "talent",
-    "action": "endorse",
-    "actor": "user3",
-    "target": "user4",
-    "meta": "{\"score\": 85}"
-  }
-]
-```
-
-Weighting edges (e.g., by amount) improves detection quality.
-
-## Data Ingestion
-
-### CSV / JSON Upload
-
-Minimum required fields: timestamp, platform, action, actor, target
-
-Parser rules:
-
-- Normalize timestamps to UTC
-- Lowercase platform + action
-- Deduplicate identical rows
-- Reject files > configurable limit
-
-### GitHub Ingestion
-
-What GitHub allows: Stars (who starred + when), Follows (current list), Events (received activity)
-
-What GitHub does NOT allow: Unstar events, Unfollow events, Historical removal logs
-
-Use snapshots + diffs to prove unfollow/unstar waves.
-
-Snapshot scripts provided in `/scripts`.
-
-## Detection Pipeline
-
-Order matters for accuracy:
-
-1. **Build interaction graph**: Nodes (actor, target), Edges (actor → target), Weight (count or amount)
-2. **Cluster detection**: Connected components, Size ≥ 5 → candidate cluster. Later: Louvain/Leiden modularity
-3. **Timing coordination**: Bin events into 5-minute windows, Count actions per (target, action), Compute z-score vs baseline, Flag zScore > 3 AND actors ≥ 5
-4. **Churn signals**: Heuristics (many actions toward same target, follow → unfollow patterns, star → unstar via diffs)
-5. **Behavioral anomalies**: Low unique targets, New accounts, High repetition
-
-## Evidence Generation
-
-Every flag must generate:
-
-```json
-{
-  "actor": "user123",
-  "sybilScore": 0.71,
-  "signals": [
-    "Part of 9-node cluster",
-    "7 unfollows in 1h",
-    "Actions within 120s window",
-    "Account age < 3 days"
-  ],
-  "linkedActors": ["userA", "userB", "userC"]
-}
-```
-
-No evidence → no claim.
-
-## Frontend Flow
-
-Upload file OR connect GitHub → Click "Analyze" → Show: Graph, Clusters, Waves, Actor scorecards → Export: CSV, JSON, ZIP evidence pack
-
-## Storage Choices
-
-Best MVP stack:
-
-- **Blob Storage** (Vercel/Cloudflare): CSV uploads & reports
-- **Postgres** (Neon/Supabase): Entities, runs, scores, audit trail
-- **Redis** (Upstash): Queues, rate limits, caching
-- **Edge Config** (Vercel): Thresholds ONLY (never data)
-
-Do NOT use: Redis as primary DB, Edge Config for logs, Mongo for graph analysis
-
-## What to Add Next (Ordered)
-
-1. Enhanced mini-app API integrations (e.g., Telegram Mini Apps data fetching)
-2. GitHub App integration for private repos
-3. Onchain funding tree detection
-4. Advanced ML-based clustering (Louvain/Leiden)
-5. Cross-platform correlation for broader detection
-
-## What NOT to Claim
-
-Never say: "We detected Sybil attackers", "These accounts are fake"
-
-Always say: "Activity consistent with coordinated behavior", "Risk indicators exceeded thresholds"
-
-This keeps the project legally safe, scientifically credible, and taken seriously by platforms.
-
-## Detection Outputs
-
-The app returns structured results for transparency and defensibility:
-
-- **Cluster Results**: `clusterId`, `members` (list), `density` (internal edges / possible edges), `conductance` (external edges / internal edges), `externalEdges`.
-- **Wave Results**: `windowStart`, `windowEnd`, `action`, `target`, `actors` (list), `zScore` (deviation from expected).
-- **Actor Scorecard**: `sybilScore` (0-1), `churnScore`, `coordinationScore`, `noveltyScore`.
-- **Evidence Pack**: "Why flagged" summary with top signals (e.g., "High churn: 8 unfollows in 1 hour; Part of cluster with 10 members").
-
-### Confidence Levels
-
-Each flagged entity is assigned a confidence tier:
-
-- **Low**: Anomalous behavior detected, weak coordination evidence
-- **Medium**: Multiple signals align (timing + churn or clustering)
-- **High**: Dense clusters + strong temporal coordination
-
-Confidence is derived from signal agreement, not score magnitude alone.
-
-Outputs are risk flags, not accusations, to avoid doxxing.
-
-## Scoring Model
-
-Even heuristic-based, the model is explicit and configurable:
-
-**SybilScore(actor) = 0.30 * coordinationScore + 0.20 * churnScore + 0.15 * clusterIsolationScore + 0.10 * newAccountScore + 0.10 * lowDiversityScore + 0.15 * profileAnomalyScore + 0.05 * sharedWalletScore + 0.05 * crossAppScore + 0.05 * sessionScore + 0.05 * fraudScore**
-
-- **coordinationScore**: Fraction of actions in bursts (>10 in 5-min window).
-- **churnScore**: Number of unfollow/unstar actions.
-- **clusterIsolationScore**: 1 - (external connections / total connections).
-- **newAccountScore**: 1 if account age < 7 days, else 0.
-- **lowDiversityScore**: 1 - (unique targets / total actions).
-- **profileAnomalyScore**: 1 if follower/following ratio < 0.1 or bio matches common spam patterns, or links to suspicious domains/shared links, else 0.
-- **sharedWalletScore**: 1 if actor shares wallets with others, else 0.
-- **crossAppScore**: 0.5 if actor active on multiple platforms, else 0.
-- **sessionScore**: Min(sessionCount / 10, 1) for high session frequency.
-- **fraudScore**: Transaction pattern anomaly score (0-1).
-
-Thresholds (e.g., SybilScore > 0.6) are configurable per platform. Tune via environment variables.
-
-## False Positive Mitigations
-
-The system explicitly reduces false positives by:
-
-- Ignoring clusters smaller than configurable thresholds
-- Discounting long-lived accounts with diverse activity
-- Down-weighting actions spread over long time windows
-- Separating organic growth spikes from coordinated bursts
-- Allowing per-platform threshold tuning
-
-## Adversarial Considerations
-
-Attackers may attempt to evade detection by:
-
-- Spreading actions over longer windows
-- Introducing noise via organic interactions
-- Mixing real and fake accounts
-- Reusing compromised aged accounts
-
-Mitigations include adaptive windows, entropy measures, and cross-platform correlation.
-
-## Graph Methods
-
-Concrete algorithms for cluster and timing detection:
-
-- **Cluster Discovery**: Connected components (for dense groups) or Louvain/Leiden modularity (for hierarchical clusters).
-- **Group Tightness**: Triangle count or clustering coefficient (measures mutual connections).
-- **Isolation**: Conductance or cut ratio (low external edges indicate farms).
-- **Reciprocity**: Fraction of mutual follows/stars.
-- **Temporal Bursts**: 5-min binning + z-score (deviation) or Poisson burst detection for waves.
-
-Start with connected components + heuristics; expand to ML later.
-
-## Evaluation & Benchmarks
-
-To build trust and iterate:
-
-- **Synthetic Generator**: Create fake Sybil clusters (e.g., 10 accounts mutually following, bursting on a target) + organic users.
-- **Metrics**: Precision/recall on synthetic ground truth; false positive review rate (<5%).
-- **Scenario Configs**: Save seeds for reproducibility (e.g., clusterSize=10, burstWindow=300s).
-
-This enables fast iteration without real data risks.
-
-## Privacy & Safety
-
-- Data uploaded stays local (no server storage unless opted-in).
-- No IP collection unless user provides logs.
-- Outputs are "risk flags" for personal defense/reporting, not public accusations.
-- Anonymized reporting to platforms (e.g., Base/Farcaster) via aggregated stats.
-
-Protects users and the project.
-
-## Integrations (Roadmap)
-
-Planned concrete endpoints for real data:
-
-- **GitHub**: REST API (stargazers, followers, events, user profiles for age/bio/follower counts). Rate limit handling. Optional GitHub App for private repos.
-- **Base/Onchain**: RPC via Alchemy/QuickNode. Transfer graphs from ERC20 events. Funding-tree detection ("common funder" chains). Wallet profiles via ENS or onchain data.
-- **Talent Protocol**: API for talent scores, endorsements, and builder networks. Sybil detection for decentralized talent verification.
-- **Farcaster**: Hub API or Neynar. Follow/cast graphs. User profiles (bio, followers, created_at).
-
-## Deployment & Storage
-
-Suggested MVP architecture:
-
-- **Blob Storage** (Vercel/Cloudflare): For CSV uploads and generated reports.
-- **Postgres** (Neon/Supabase): Entities, runs, scores, audit trail.
-- **Redis** (Upstash): Rate limits, job queues, caching.
-- **Edge Config** (Vercel): Feature flags, thresholds (not data).
-
-Deployable on Vercel for simplicity.
-
-## Abuse Response Playbook
-
-Since Sybil attacks are common:
-
-- **Lock Repo Interactions**: Enable branch protection, require approvals.
-- **Export Evidence**: CSV + JSON summary of flagged actors/clusters.
-- **Report to Platform**: Anonymized patterns to GitHub/Base/Farcaster teams.
-- **Evidence Pack Format**: Structured for platform reports.
-
-## Screenshots / Demo
-
-- Graph view: Interactive Cytoscape graph of interactions.
-- Cluster report: List of suspicious clusters with members (see Sample Reports).
-- Wave/timing chart: Bursts highlighted.
-- Export evidence: Downloadable pack (JSON example above).
-
-(Sample outputs provided above; add actual screenshots later.)
-
-## Project Structure
-
-- `/app`: Next.js routes (upload, results, API endpoints)
-  - `page.tsx`: Landing / upload
-  - `analyze/page.tsx`: Analysis results
-  - `api/analyze/route.ts`: Main analysis endpoint
-  - `api/github/route.ts`: GitHub fetcher
-- `/lib`: Core logic
-  - `ingest/`: Data ingestion (CSV, JSON, GitHub)
-  - `graph/`: Graph building and clustering
-  - `signals/`: Detection signals (timing, churn, etc.)
-  - `scoring/`: Sybil score calculation
-  - `evidence/`: Evidence generation
-- `/components`: React components (Upload, GraphView, etc.)
-- `/datasets`: Sample and synthetic data
-- `/scripts`: Shell scripts for GitHub snapshots
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js 18+
-- npm or yarn
-
-### Installation
-
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-### Running the App
-
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) to view the app.
-
-### Building for Production
-
-```bash
-npm run build
-npm start
-```
-
-### Notes (Static Export)
-
-This project uses Next.js **API routes** under `app/api/*` for URL imports, profile scanning, and synthetic data generation. Because of that, **static HTML export** (`output: 'export'` / `next export`) is not supported — deploy it as a normal Next.js server app (e.g., Vercel or a Node server).
-
-### Optional Environment Variables
-
-- `GITHUB_TOKEN`: raises GitHub rate limits for the GitHub connector.
-- `BASE_RPC_URL`: Base JSON-RPC URL for onchain fetch (you can also paste an RPC URL in the UI).
-
-## Usage
-
-1. Upload a CSV or JSON file with the required fields: timestamp, actor, target, action, platform.
-   - Actions: follow, star, unfollow, unstar, etc.
-   - Platforms: github, farcaster, binance, etc.
-2. Click "Start Analysis" to process the data.
-3. View the interaction graph.
-4. See detected suspicious clusters, coordinated waves, and high-churn actors.
-5. Export evidence pack as JSON.
-
-A sample CSV file `sample_logs.csv` is provided for testing.
-
-## Sample Reports
-
-The app generates structured JSON reports for clusters, waves, actor scorecards, and evidence packs. Below are examples based on the sample data.
-
-### Example Cluster Results
-
-```json
-[
-  {
-    "clusterId": 1,
-    "members": ["user1", "user2", "user3", "user4", "user5", "user6", "user7", "user8", "user9", "user10"],
-    "density": 0.2,
-    "conductance": 0.8,
-    "externalEdges": 2
-  }
-]
-```
-
-### Example Wave Results
-
-```json
-[
-  {
-    "windowStart": "2023-01-01T10:19:00Z",
-    "windowEnd": "2023-01-01T10:27:00Z",
-    "action": "unfollow",
-    "target": "user3",
-    "actors": ["user1", "user2", "user4", "user5", "user6", "user7", "user8", "user9", "user10"],
-    "zScore": 3.5
-  }
-]
-```
-
-### Example Actor Scorecard
-
-```json
-{
-  "user1": {
-    "sybilScore": 0.75,
-    "churnScore": 0.8,
-    "coordinationScore": 0.9,
-    "noveltyScore": 0.1,
-    "sharedWallets": ["0x123...", "0x456..."],
-    "crossAppPlatforms": ["telegram", "twitter"],
-    "sessionCount": 12,
-    "fraudTxScore": 0.3,
-    "confidence": "High"
-  }
-}
-```
-
-### Example Evidence Pack (JSON Export)
-
-```json
-{
-  "summary": "High-confidence Sybil cluster detected with coordinated unfollow wave.",
-  "clusters": [...],
-  "waves": [...],
-  "scorecards": {...},
-  "exportedAt": "2023-01-01T12:00:00Z"
-}
-```
-
-These reports can be exported as JSON for further analysis or reporting to platforms.
-
-## Technologies Used
-
-- Next.js 16.1.6
-- React 19.2.3
-- TypeScript
-- Tailwind CSS
-- Cytoscape.js for graph visualization
-- PapaParse for CSV parsing
-- Web Workers for performance
-- IndexedDB for local storage
-
-## Future Improvements
-
-- Integrate Python backend for advanced analysis (networkx, pandas).
-- Add ML models (LightGBM on subgraphs).
-- Support real API integrations (GitHub, Base, Binance).
-- Enhance mini-app integrations (Telegram, Discord bots).
-- Anonymized reporting to platforms.
-
-## References
-
-- [Sybil Attack - Wikipedia](https://en.wikipedia.org/wiki/Sybil_attack)
-- Yu et al. (2008). SybilGuard: defending against sybil attacks via social networks.
-- Cao et al. (2012). Aiding the detection of fake accounts in large scale social online services.
-- Arbitrum Sybil Detection
-- TrustaLabs Airdrop Sybil Identification
-
-## Future Enhancements
-
-Based on ongoing development, here are prioritized suggestions for expanding Sybil Shield's capabilities:
-
-### Advanced Analytics
-- **Time-Series Anomaly Detection**: Statistical models (e.g., ARIMA) for unusual activity spikes.
-- **Action Sequence Mining**: Markov chains for detecting scripted bot patterns.
-- **Graph Embeddings**: node2vec for similarity-based clustering.
-- **Community Detection**: Louvain/Leiden algorithms for hierarchical Sybil structures.
-
-### Machine Learning
-- **Unsupervised Anomaly Scoring**: Autoencoders for deviation detection.
-- **Supervised Classification**: User-labeled datasets for custom models.
-- **Explainable AI**: LIME/SHAP for ML prediction explanations.
-
-### Onchain Features
-- **Funding Tree Analysis**: Trace common funders in blockchain logs.
-- **Token Flow Graphs**: Directed graphs for transfer patterns.
-- **Gas Fee Anomalies**: Detect bots via transaction costs.
-
-### Cross-Platform
-- **Fuzzy Identity Matching**: Link similar handles across platforms.
-- **Multi-Platform Waves**: Coordinated attacks spanning services.
-
-### Performance & UX
-- **Incremental Analysis**: Re-analyze new data without full recomputation.
-- **Real-Time Alerts**: Notifications for high-risk detections.
-- **Custom Dashboards**: Personalized metric views.
-
-### Integrations
-- **API Connectors**: Real endpoints for Base, Farcaster, Talent.
-- **Plugin System**: Custom signal extensions.
-- **Webhook Notifications**: External alerts.
-
-For implementation, follow the Suggestion Workflow: design, implement, test, document, deploy.
-
-## License
-
-MIT

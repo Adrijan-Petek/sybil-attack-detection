@@ -124,8 +124,9 @@ export default function Home() {
   const [notificationsSupported, setNotificationsSupported] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<'default' | 'granted' | 'denied' | 'unsupported'>('unsupported');
   const [graphMinScore, setGraphMinScore] = useState(0);
-  const [graphFlaggedOnly, setGraphFlaggedOnly] = useState(true);
+  const [graphFlaggedOnly, setGraphFlaggedOnly] = useState(false);
   const [graphSearch, setGraphSearch] = useState('');
+  const [graphPlatform, setGraphPlatform] = useState<'all' | 'github' | 'x' | 'binance' | 'base' | 'farcaster' | 'talent' | 'other'>('all');
 
   type AssistantMessage = { role: 'user' | 'assistant'; text: string; at: string };
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
@@ -377,19 +378,58 @@ export default function Home() {
     }
   }, [activeTab]);
 
-	  const filteredGraphElements = useMemo(() => {
-	    if (!elements || elements.length === 0) return [];
-	    const scoreByActor = new Map<string, number>(scorecards.map((s) => [s.actor, s.sybilScore]));
-	    const q = graphSearch.trim().toLowerCase();
-	    type ElemData = { id?: unknown; source?: unknown; target?: unknown };
-	    const dataOf = (el: ElementDefinition): ElemData => (el as unknown as { data?: ElemData }).data ?? {};
-	    const keepNode = (id: string) => {
-	      const score = scoreByActor.get(id) || 0;
-	      if (graphFlaggedOnly && score <= settings.threshold) return false;
-	      if (score < graphMinScore) return false;
-	      if (q && !id.toLowerCase().includes(q)) return false;
-	      return true;
-	    };
+  const filteredGraphElements = useMemo(() => {
+    if (!elements || elements.length === 0) return [];
+    const scoreByActor = new Map<string, number>(scorecards.map((s) => [s.actor, s.sybilScore]));
+    const q = graphSearch.trim().toLowerCase();
+    type ElemData = { id?: unknown; source?: unknown; target?: unknown };
+    const dataOf = (el: ElementDefinition): ElemData => (el as unknown as { data?: ElemData }).data ?? {};
+    const normalizePlatform = (p: string) => {
+      const x = String(p || '').trim().toLowerCase();
+      if (x === 'twitter' || x === 'twitter.com' || x === 'x.com' || x === 'x') return 'x';
+      if (x.startsWith('binance')) return 'binance';
+      return x;
+    };
+    const actorPlatformCounts = new Map<string, Map<string, number>>();
+    for (const l of logs) {
+      const actor = String(l.actor || '');
+      if (!actor) continue;
+      const p = normalizePlatform(String(l.platform || ''));
+      if (!p) continue;
+      if (!actorPlatformCounts.has(actor)) actorPlatformCounts.set(actor, new Map());
+      const m = actorPlatformCounts.get(actor)!;
+      m.set(p, (m.get(p) || 0) + 1);
+    }
+    const primaryPlatformOf = (id: string) => {
+      if (!id) return '';
+      const colon = id.indexOf(':');
+      if (colon > 0) return normalizePlatform(id.slice(0, colon));
+      const m = actorPlatformCounts.get(id);
+      if (!m) return '';
+      let best = '';
+      let bestC = 0;
+      m.forEach((c, p) => {
+        if (c > bestC) {
+          bestC = c;
+          best = p;
+        }
+      });
+      return best;
+    };
+    const platformOk = (id: string) => {
+      if (graphPlatform === 'all') return true;
+      const p = primaryPlatformOf(id);
+      if (graphPlatform === 'other') return p !== 'github' && p !== 'x' && p !== 'binance' && p !== 'base' && p !== 'farcaster' && p !== 'talent';
+      return p === graphPlatform;
+    };
+    const keepNode = (id: string) => {
+      const score = scoreByActor.get(id) || 0;
+      if (graphFlaggedOnly && score <= settings.threshold) return false;
+      if (score < graphMinScore) return false;
+      if (q && !id.toLowerCase().includes(q)) return false;
+      if (!platformOk(id)) return false;
+      return true;
+    };
 
 	    const nodeIds = elements.map((e) => dataOf(e).id).filter((x): x is unknown => x !== undefined && x !== null).map((x) => String(x));
 	    const kept = new Set(nodeIds.filter(keepNode));
@@ -407,7 +447,7 @@ export default function Home() {
 	      }
 	    }
 	    return out;
-	  }, [elements, graphFlaggedOnly, graphMinScore, graphSearch, scorecards, settings.threshold]);
+  }, [elements, graphFlaggedOnly, graphMinScore, graphSearch, graphPlatform, logs, scorecards, settings.threshold]);
 
   const evidenceObject = useMemo(() => {
     const profileLinks = Object.fromEntries(
@@ -2490,6 +2530,23 @@ export default function Home() {
                 Flagged only
               </label>
               <label className="text-xs text-slate-300 flex items-center gap-2">
+                Platform
+                <select
+                  value={graphPlatform}
+                  onChange={(e) => setGraphPlatform(e.target.value as typeof graphPlatform)}
+                  className="border border-slate-800 bg-slate-950/60 rounded px-2 py-1 text-xs text-slate-100"
+                >
+                  <option value="all">All</option>
+                  <option value="github">GitHub</option>
+                  <option value="x">X (Twitter)</option>
+                  <option value="binance">Binance</option>
+                  <option value="base">Base</option>
+                  <option value="farcaster">Farcaster</option>
+                  <option value="talent">Talent</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+              <label className="text-xs text-slate-300 flex items-center gap-2">
                 Min score
                 <input
                   type="number"
@@ -2508,38 +2565,84 @@ export default function Home() {
                 className="flex-1 min-w-[220px] border border-slate-800 bg-slate-950/60 rounded px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500"
               />
             </div>
+            {elements.length > 0 && filteredGraphElements.length === 0 && (
+              <div className="mb-3 border border-slate-800 bg-black/40 rounded-lg p-3 text-sm text-slate-200">
+                No nodes match your filters. Try disabling <span className="font-semibold">Flagged only</span>, lowering <span className="font-semibold">Min score</span>, or clearing search.
+                <div className="mt-2 flex gap-2">
+                  <button
+                    onClick={() => {
+                      setGraphFlaggedOnly(false);
+                      setGraphPlatform('all');
+                      setGraphMinScore(0);
+                      setGraphSearch('');
+                    }}
+                    className="px-3 py-1.5 rounded bg-slate-100 text-slate-950 text-xs font-semibold hover:bg-white"
+                  >
+                    Reset filters
+                  </button>
+                </div>
+              </div>
+            )}
             <div style={{ width: '100%', height: '640px' }}>
               <CytoscapeComponent
                 elements={filteredGraphElements}
                 cy={(cy: unknown) => {
                   cyRef.current = cy;
                 }}
-                style={{ width: '100%', height: '100%' }}
-                stylesheet={[
-                  {
-                    selector: 'node',
-                    style: {
-                      'background-color': (ele: NodeSingular) => {
-                        const scorecard = scorecards.find(s => s.actor === ele.data('id'));
-                        return scorecard && scorecard.sybilScore > settings.threshold ? 'rgb(220 38 38)' : 'rgb(37 99 235)';
+                style={{ width: '100%', height: '100%', backgroundColor: 'rgb(2 6 23)' }}
+	                stylesheet={[
+	                  {
+	                    selector: 'node',
+	                    style: {
+	                      'background-color': (ele: NodeSingular) => {
+	                        const scorecard = scorecards.find((s) => s.actor === ele.data('id'));
+	                        return scorecard && scorecard.sybilScore > settings.threshold ? 'rgb(220 38 38)' : 'rgb(37 99 235)';
+	                      },
+	                      'border-width': (ele: NodeSingular) => {
+	                        const scorecard = scorecards.find((s) => s.actor === ele.data('id'));
+	                        return scorecard && scorecard.sybilScore > settings.threshold ? 2.5 : 1.5;
+	                      },
+	                      'border-color': (ele: NodeSingular) => {
+	                        const scorecard = scorecards.find((s) => s.actor === ele.data('id'));
+	                        return scorecard && scorecard.sybilScore > settings.threshold ? 'rgb(220 38 38)' : 'rgb(30 41 59)';
+	                      },
+	                      'label': (ele: NodeSingular) => {
+                        const id = String(ele.data('label') || ele.data('id') || '');
+                        if (!id) return '';
+                        // Keep labels readable on dense graphs.
+                        if (id.length <= 28) return id;
+                        return `${id.slice(0, 12)}…${id.slice(-12)}`;
                       },
-                      label: 'data(label)',
-                      'text-valign': 'center',
-                      'text-halign': 'center',
-                      'font-size': '10px',
-                      color: 'rgb(248 250 252)',
-                      'text-outline-color': 'rgb(2 6 23)',
-                      'text-outline-width': 1,
-                    },
-                  },
+	                      'text-valign': 'center',
+	                      'text-halign': 'center',
+	                      'font-size': 13,
+	                      'font-weight': 700,
+	                      'font-family': 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial',
+	                      'color': '#ffffff',
+	                      'text-outline-color': (ele: NodeSingular) => {
+	                        const scorecard = scorecards.find((s) => s.actor === ele.data('id'));
+	                        return scorecard && scorecard.sybilScore > settings.threshold ? 'rgb(127 29 29)' : '#000000';
+	                      },
+	                      'text-outline-width': 3,
+	                      'text-outline-opacity': 1,
+	                      'text-background-color': '#000000',
+	                      'text-background-opacity': 0.92,
+	                      'text-background-shape': 'roundrectangle',
+	                      'text-background-padding': '4px',
+	                      'text-opacity': 1,
+	                      'text-wrap': 'wrap',
+	                      'text-max-width': '160px',
+	                    },
+	                  },
                   {
                     selector: 'edge[type="interaction"]',
                     style: {
                       width: 2,
-                      'line-color': 'rgb(52 211 153)',
-                      'target-arrow-color': 'rgb(52 211 153)',
+                      'line-color': 'rgb(34 197 94)',
+                      'target-arrow-color': 'rgb(34 197 94)',
                       'target-arrow-shape': 'triangle',
                       'curve-style': 'bezier',
+                      opacity: 0.85,
                     },
                   },
                 ]}

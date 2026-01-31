@@ -95,7 +95,7 @@ function inferActorIdFromUrl(urlStr: string): string {
     if (host === 'talent.app' && parts.length >= 1) return `talent:${parts[parts.length - 1]}`;
     if (host === 'github.com' && parts.length >= 1) return `github:${parts[0]}`;
     if (host === 'warpcast.com' && parts.length >= 1) return `farcaster:${parts[0]}`;
-    if ((host === 'x.com' || host === 'twitter.com') && parts.length >= 1) return `twitter:${parts[0]}`;
+    if ((host === 'x.com' || host === 'twitter.com') && parts.length >= 1) return `x:${parts[0]}`;
     if ((host === 't.me' || host === 'telegram.me') && parts.length >= 1) return `telegram:${parts[0]}`;
     if (host === 'discord.gg' && parts.length >= 1) return `discord:${parts[0]}`;
     if (host === 'lenster.xyz' && parts.length >= 1) return `lens:${parts[0]}`;

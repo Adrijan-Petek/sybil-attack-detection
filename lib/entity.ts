@@ -168,7 +168,7 @@ export function computeControllerGroups(input: {
     connectMany(Array.from(set), `Shared handle stem: ${stem}`);
   });
 
-  // 3b) Exact base handle match across platforms (e.g., github:alice + twitter:alice)
+  // 3b) Exact base handle match across platforms (e.g., github:alice + x:alice)
   const baseHandleToActors = new Map<string, Set<string>>();
   for (const actor of actors) {
     const parts = actor.split(':');

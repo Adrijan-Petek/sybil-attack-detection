@@ -39,7 +39,7 @@ export async function GET(req: Request) {
   const token = process.env.GITHUB_TOKEN;
   const headers: HeadersInit = {
     Accept: 'application/vnd.github+json, application/vnd.github.v3.star+json',
-    'User-Agent': 'sybil-attack-detection',
+    'User-Agent': 'sybil-shield',
   };
   if (token) headers.Authorization = `Bearer ${token}`;
 
